@@ -1,24 +1,26 @@
 
 
 phmc_mpl.control=function(basis="msplines",maxIter=c(150,75e+02,1e+04),epsilon=c(1e-16, 1e-10),kappa=1/0.6,conv_limit=1e-4,
-                          smooth=0,min.theta=1e-10,n.knots=c(8,2),order=3,range.quant=c(0.075,0.9),
-                          penalty=2,ties="epsilon",seed=NULL){
-  basis        = basis.name_mpl(basis)
-  maxIter     = c(ifelse(is.null(smooth),ifelse(maxIter[1]>0,as.integer(maxIter[1]),1.5e+2),1L),
+                          smooth=0,min.theta=1e-10,n.knots=c(8),order=3,range.quant=c(0.075,0.9),
+                          ties="epsilon",seed=NULL){
+  
+  basis="msplines"
+  basis = basis.name_mpl(basis)
+  maxIter = c(ifelse(is.null(smooth),ifelse(maxIter[1]>0,as.integer(maxIter[1]),1.5e+2),1L),
                   ifelse(maxIter[2]>0,as.integer(maxIter[2]),7.5e+2),
                   ifelse(length(maxIter)==2,1e+6,
                          ifelse(maxIter[3]>ifelse(maxIter[2]>0,as.integer(maxIter[2]),7.5e+2),
                                 as.integer(maxIter[3]),1e+4))) 
   
+  penalty=order-1
   conv_limit=ifelse(conv_limit>0 & conv_limit<1,conv_limit,1e-4)
-  if(is.null(n.knots)|sum(n.knots)<1|length(n.knots)!=2){
-    n.knots    = if(basis!='msplines'){stop("Choose msplines basis.")}else{c(8,2)}
+  if(is.null(n.knots)|sum(n.knots)<1|length(n.knots)!=1){
+    n.knots    = if(basis!='msplines'){stop("Choose msplines basis.")}else{c(8)}
   }
   if(all(range.quant<=1) & all(range.quant>=0) & length(range.quant)==2){
     range.quant = range.quant[order(range.quant)]
   }else{range.quant = c(0.075,.9)}
   min.theta    = ifelse(min.theta>0 & min.theta<1e-3,min.theta,1e-10)
-  penalty      = penalty.order_mpl(penalty,basis,order)
   order        = ifelse(order>0 & order<6,as.integer(order),3L)    
   kappa        = ifelse(kappa>1, kappa, 1/.6)
   if(!is.null(smooth)){
@@ -66,6 +68,101 @@ penalty.order_mpl <- function(p,basis,order){
   switch(basis,
          'msplines' = order-1)
 }
+
+basis_phmc = function(events, knots, basis="msplines", order=3, which=1){
+  n=length(events)
+  Alpha=knots$Alpha
+  Delta=knots$Delta
+  n.Alpha=length(Alpha)
+  m=ifelse(basis=="msplines",n.Alpha+order-2,knots$m)
+  M_Psi_nm=M_psi_nm=matrix(0,n,m)
+  seq1n = 1:n
+  Alpha_star=as.numeric(c(rep(Alpha[1],order-1L),Alpha,rep(Alpha[n.Alpha],order-1L)))
+  M_psi_nm=M_Psi_nm=cbind(M_psi_nm,0) #why add a column?
+  if(which==1){
+    Alpha_star_x = sapply(events,function(y,lim=Alpha[-1L])sum(lim<y)+1L)+order-1L
+    M_psi_nm[(Alpha_star_x-1L)*n+seq1n]=1/(Alpha_star[Alpha_star_x+1]-Alpha_star[Alpha_star_x])
+    if(order>1){
+      for(ow in 2:order){
+        uw_x = Alpha_star_x-ow+1
+        for(pw in 0:(ow-1)){
+          pos_x = (uw_x+pw-1L)*n+seq1n
+          M_psi_nm[pos_x]=(ow/((ow-1)*(Alpha_star[1:m+ow]-Alpha_star[1:m])))[uw_x+pw]*((events-Alpha_star[uw_x+pw])*M_psi_nm[pos_x]+(Alpha_star[uw_x+pw+ow]-events)*M_psi_nm[pos_x+n])
+        }
+      }
+    }
+    M_psi_nm = M_psi_nm[,1:m,drop=FALSE]
+    M_psi_nm
+  }
+  
+  else{
+    rank.events=rank(events)
+    events=events[order(events)]
+    Alpha_x=sapply(events,function(y,lim=Alpha[-1L])sum(lim<y)+1L)
+    up_u     = cumsum(tabulate(Alpha_x,n.Alpha-1))
+    for(uw in 1:(m-order+1)){M_Psi_nm[min(n,up_u[uw]+1):n,uw] = 1} 
+    Alpha_star2 = c(rep(Alpha[1],order),Alpha,rep(Alpha[n.Alpha],order))    
+    factor_v    = c((Alpha_star2[(order+2):length(Alpha_star2)]-Alpha_star2[1:(length(Alpha_star2)-order-1)])/
+                      (order+1),rep(0,order-1))
+    first=basis_phmc(events,knots,order=order+1,which=1)
+    M_psi2_nm   = cbind(basis_phmc(events,knots,basis=basis,order=order+1,which=1),matrix(0,n,order-1))
+    pos_xo  = rep((Alpha_x-1L)*n,1)+seq1n
+    pos_xo1 = rep(pos_xo,order)+rep(1:order,each=n)*n
+    for(ow in 0:(order-1)){
+      M_Psi_nm[pos_xo+ow*n] = apply(matrix(M_psi2_nm[pos_xo1+ow*n]*
+                                             factor_v[rep(Alpha_x,order)+rep((1:order)+ow,each=n)],ncol=order),1,sum)
+    }
+    M_Psi_nm = M_Psi_nm[rank.events,1:m,drop=FALSE]
+    M_Psi_nm
+  }
+}
+
+knots_phmc = function(events,basis="msplines",n.knots=c(8), range.quant=c(0.075,0.9),order=3){
+  n.events=length(events)
+  range=range(events)
+  Alpha=quantile(events,seq(0,1,length.out=(n.knots[1]+2)))
+  n.Alpha  = length(Alpha)
+  if(basis=="msplines"){
+    m = n.Alpha+order-2
+    list(m=m, Alpha=Alpha, Delta=rep(1,m))
+  }else{
+    stop("Choose msplines basis.")
+  }
+}
+
+penalty_phmc = function(knots, basis="msplines", order=3){
+  m = knots$m
+  R = matrix(0,m,m)
+  Alpha = knots$Alpha
+  n.Alpha=length(Alpha)
+  Alpha_star = c(rep(Alpha[1],order-1),Alpha,rep(Alpha[n.Alpha],order-1))
+  if(basis=="msplines"){
+    seq1n=1:(n.Alpha-1)
+    n.Alpha_star=length(Alpha_star)
+    Alpha_star_x=sapply(Alpha[-1],function(y,lim=Alpha[-1])sum(lim<y)+1)+order-1
+    M_d2f_mm = matrix(0,n.Alpha-1,n.Alpha+order-1L)
+    M_d2f_mm[(Alpha_star_x-1L)*(n.Alpha-1)+seq1n]=1/(Alpha_star[Alpha_star_x+1]-Alpha_star[Alpha_star_x])
+    for(ow in 2L:order){
+      pw   = 1L:ow 
+      uw_x = Alpha_star_x-ow+1L
+      for(pw in 0:(ow-1L)){
+        M_d2f_mm[(uw_x+pw-1L)*(n.Alpha-1)+seq1n]=
+          (ow/(Alpha_star[1:(n.Alpha+ow)+ow]-Alpha_star[1:(n.Alpha+ow)]))[uw_x+pw]*
+          (M_d2f_mm[(uw_x+pw-1L)*(n.Alpha-1)+seq1n]-M_d2f_mm[(uw_x+pw)*(n.Alpha-1)+seq1n])
+      }
+    }
+    M_d2f_mm = M_d2f_mm[,1:m,drop=FALSE]
+    for(uw in 1:m){
+      for(vw in uw:m){
+        R[uw,vw] = R[vw,uw] = 
+          sum((M_d2f_mm[,uw]*M_d2f_mm[,vw])*(Alpha[-1]-Alpha[-n.Alpha]))
+      }
+    }
+  }else{stop("Choose msplines basis.")}
+  R
+}
+
+
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -686,18 +783,6 @@ phmc_mpl = function(ph.formula,pi.formula,data,control,...){
   Sp = Q-matrix(rep(c(rep(0,p+q),TwoLRtheta),n),n,byrow=T)/n
   Q = t(Sp)%*%Sp
   
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
   Minv_2=corr=matrix(0,p+q+m,p+q+m)
   diag(corr)=rep(1,m+q+p)
   corr[!pos,]=0
@@ -715,7 +800,7 @@ phmc_mpl = function(ph.formula,pi.formula,data,control,...){
     
   }
   
-  convergence=c(save,iter,k)
+  convergence=c(save,iter,k,full.iter)
   
   #output
   fit=list(beta=beta,gamma=gamma,theta=theta*(theta>control$min.theta))
@@ -729,8 +814,8 @@ phmc_mpl = function(ph.formula,pi.formula,data,control,...){
   fit$loglik=log_lik+lambda*thetaRtheta
   fit$dimensions=list(p=p, q=q, m=m)
   fit$smooth=lambda
-  fit$pos=pos
   fit$convergence=convergence
+  fit$control=control
   class(fit)="phmc_mpl"
   fit
   
